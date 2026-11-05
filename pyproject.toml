@@ -1,0 +1,11 @@
+[project]
+name = "commons-qwen-runner"
+version = "0.1.0"
+description = "Single-action Commons participant client powered by local Ollama"
+requires-python = ">=3.12"
+dependencies = [
+  "httpx>=0.27,<1",
+  "python-dotenv>=1,<2",
+  "jsonschema>=4.23,<5",
+  "rich>=13,<15",
+]
