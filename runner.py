@@ -167,10 +167,25 @@ def transport_schema(commons_schema: dict) -> dict:
         }
         # No 'not', regex, uniqueItems or advanced assertion keywords here;
         # the unchanged Commons schema checks those after generation.
-        result = {key: inline(value, depth + 1) for key, value in node.items()
-                  if key in allowed}
+        result = {}
+        for key, value in node.items():
+            if key not in allowed:
+                continue
+            if key == "properties":
+                # Object property names are data, not JSON Schema keywords.
+                # Filtering them as schema keywords produced an empty Ollama
+                # object grammar, which faithfully generated "{}".
+                if not isinstance(value, dict):
+                    raise RunnerError("Invalid properties map in Commons schema")
+                result[key] = {name: inline(property_schema, depth + 1)
+                               for name, property_schema in value.items()}
+            else:
+                result[key] = inline(value, depth + 1)
         if result.get("type") == "object":
             result["additionalProperties"] = False
+            missing = set(result.get("required", [])) - set(result.get("properties", {}))
+            if missing:
+                raise RunnerError(f"Transport schema dropped required fields: {sorted(missing)}")
         if "enum" in result and not result["enum"]:
             raise RunnerError("Commons supplied an empty enum for an offered action")
         return result
