@@ -94,7 +94,7 @@ class TransportSchemaTests(unittest.TestCase):
             transport_schema({"$defs": {"actions": {}}})
 
     def test_prompt_consumes_cognitive_context_not_operational_plan(self):
-        state = {"context": {
+        state = {"schema": {"$defs": {"actions": {"participant.rest": {"required": ["action"], "properties": {"action": {"const": "participant.rest"}}}}}}, "context": {
             "participant": {"callsign": "Qwen"},
             "read": {"propositions": []},
             "gate": {"acting_id": "A", "propositions": []},
@@ -104,6 +104,7 @@ class TransportSchemaTests(unittest.TestCase):
         messages = prompt_for(state)
         self.assertEqual(__import__("json").loads(messages[1]["content"]), state["context"])
         self.assertNotIn("plan", messages[1]["content"])
+        self.assertIn("participant.rest", messages[2]["content"])
 
 
 if __name__ == "__main__":
