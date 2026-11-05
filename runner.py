@@ -103,6 +103,10 @@ def prompt_for(state: dict) -> list[dict]:
     context = state["context"]
     if not isinstance(context, dict):
         raise RunnerError("Ready participation response has no cognitive context")
+    actions = (state["schema"].get("$defs") or {}).get("actions") or {}
+    guide = [{"action": name, "purpose": item.get("description", ""),
+              "required_fields": item.get("required", [])}
+             for name, item in actions.items()]
     return [
         {"role": "system", "content": (
             "You are the Participant identified in the supplied context. "
@@ -117,6 +121,8 @@ def prompt_for(state: dict) -> list[dict]:
             "establish evidence availability; the Commons server remains authoritative."
         )},
         {"role": "user", "content": json.dumps(context, ensure_ascii=False, separators=(",", ":"))},
+        {"role": "user", "content": "Available actions (descriptions, not an output template): " +
+         json.dumps(guide, ensure_ascii=False, separators=(",", ":"))},
     ]
 
 
@@ -190,7 +196,7 @@ def transport_schema(commons_schema: dict) -> dict:
                 if "enum" in patch:
                     base.pop("const", None)
                 # A specialized nested union replaces the original, not both.
-                if "anyOf" in patch or "oneOf" in patch:
+                if "anyOf" in patch or "oneOf" in patch or "$ref" in patch:
                     base.pop("anyOf", None)
                     base.pop("oneOf", None)
                     base.pop("$ref", None)
@@ -206,7 +212,7 @@ def transport_schema(commons_schema: dict) -> dict:
     if not variants:
         raise RunnerError("No usable Ollama action branches")
     # Each branch is a contribution object: no participant/phase wrapper.
-    return variants[0] if len(variants) == 1 else {"oneOf": variants}
+    return variants[0] if len(variants) == 1 else {"anyOf": variants}
 
 
 def infer(cfg: dict, messages: list[dict], output_schema: dict) -> tuple[dict, dict]:
