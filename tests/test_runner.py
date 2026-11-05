@@ -89,6 +89,23 @@ class TransportSchemaTests(unittest.TestCase):
         ]}
         self.assertTrue(validation_messages(original, contribution))
 
+    def test_single_acquisition_defer_requires_actual_fields(self):
+        schema = {"$defs": {"actions": {"acquisition.defer": {
+            "type": "object", "additionalProperties": False,
+            "required": ["action", "reason", "execution_id"],
+            "properties": {
+                "action": {"const": "acquisition.defer"},
+                "reason": {"type": "string", "minLength": 1},
+                "execution_id": {"type": "string", "const": "EXEC"},
+            },
+        }}}}
+        output = transport_schema(schema)
+        validator = Draft202012Validator(output)
+        self.assertEqual(set(output["properties"]), {"action", "reason", "execution_id"})
+        self.assertTrue(list(validator.iter_errors({})))
+        self.assertFalse(list(validator.iter_errors(
+            {"action": "acquisition.defer", "reason": "No evidence.", "execution_id": "EXEC"})))
+
     def test_empty_or_invalid_action_inventory_fails_closed(self):
         with self.assertRaises(RunnerError):
             transport_schema({"$defs": {"actions": {}}})
