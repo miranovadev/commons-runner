@@ -132,8 +132,15 @@ def prompt_for(state: dict) -> list[dict]:
             "Do not invent actions, identifiers or unsupported arguments. "
             "Only include receipt_options if the selected action explicitly allows them, "
             "and only use IDs permitted by its load/unload enumerations. "
-            "Respond with ONLY one JSON object representing the contribution, "
-            "not a phase_id wrapper, not markdown, and no explanation outside JSON."
+            "CRITICAL OUTPUT CONTRACT: The supplied context is INPUT DATA, not an output template. "
+            "Never reproduce participant, phase, lineage, read_options, gate_options, "
+            "write_options, receipts, or actions in your response. "
+            "Return exactly one JSON contribution object with an 'action' property "
+            "whose value is one of the available actions. "
+            "Include only fields permitted by that action's JSON Schema. "
+            "Do not include participant identity, Cycle or Phase metadata, "
+            "or wrap the contribution in another object. "
+            "Return JSON only, without markdown or commentary."
         )},
         {"role": "user", "content": json.dumps(payload, ensure_ascii=False, separators=(",", ":"))},
     ]
@@ -378,8 +385,8 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        console.print("\n[yellow]Interrupted. Previously accepted contributions are preserved.[/yellow]", stderr=True)
+        error_console.print("\n[yellow]Interrupted. Previously accepted contributions are preserved.[/yellow]")
         sys.exit(130)
     except (RunnerError, httpx.HTTPError) as exc:
-        console.print(f"\n[red]Error:[/red] {exc}", stderr=True)
+        error_console.print(f"\n[red]Error:[/red] {exc}")
         sys.exit(1)
