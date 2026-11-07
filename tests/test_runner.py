@@ -3,7 +3,8 @@ import unittest
 
 from jsonschema import Draft202012Validator
 
-from runner import RunnerError, prompt_for, transport_schema, validation_messages
+from runner import (RunnerError, prompt_for, transport_schema, validation_messages,
+                    prohibited_instrument_invocations, prohibited_instrument_match)
 
 
 class TransportSchemaTests(unittest.TestCase):
@@ -88,6 +89,58 @@ class TransportSchemaTests(unittest.TestCase):
             {"$ref": "#/$defs/actions/instrument.execute"},
         ]}
         self.assertTrue(validation_messages(original, contribution))
+
+    def test_instrument_exclusions_are_explained_without_changing_generation_schema(self):
+        schema = {
+            **self.schema,
+            "x-commons": {"instrument_exclusions": {
+                "A": [{"receipt_id": "R1", "invocation": {
+                    "kind": "citation", "reference": "A",
+                }}],
+            }},
+        }
+        denied = {"action": "instrument.execute", "proposition_id": "A",
+                  "instrument": {"kind": "citation", "reference": "A"}}
+        allowed = {"action": "instrument.execute", "proposition_id": "A",
+                   "instrument": {"kind": "citation", "reference": "B"}}
+        original = {"$defs": schema["$defs"], "oneOf": [
+            {"$ref": "#/$defs/actions/instrument.execute"},
+        ]}
+        original["$defs"]["actions"]["instrument.execute"]["not"] = {
+            "anyOf": [{"required": ["proposition_id", "instrument"], "properties": {
+                "proposition_id": {"const": "A"},
+                "instrument": {"required": ["kind", "reference"], "properties": {
+                    "kind": {"const": "citation"},
+                    "reference": {"enum": ["A"]},
+                }},
+            }}],
+        }
+        original["x-commons"] = schema["x-commons"]
+        self.assertEqual(prohibited_instrument_invocations(schema), [{
+            "proposition_id": "A", "instrument": {"kind": "citation", "reference": "A"},
+        }])
+        self.assertEqual(prohibited_instrument_match(schema, denied)["proposition_id"], "A")
+        self.assertIsNone(prohibited_instrument_match(schema, allowed))
+        self.assertIsNone(prohibited_instrument_match(schema, {"action": "participant.rest"}))
+        state = {"context": {"read": {"propositions": []},
+                             "gate": {"propositions": []},
+                             "write": {"propositions": []},
+                             "receipts": []}, "schema": original}
+        messages = prompt_for(state)
+        self.assertIn("PROHIBITED instrument.execute", messages[-1]["content"])
+        self.assertIn('"reference":"A"', messages[-1]["content"])
+        self.assertIn("already been performed or is excluded",
+                      validation_messages(original, denied)[0])
+        self.assertFalse(validation_messages(original, allowed))
+        # Ollama's transport is intentionally permissive; Commons still rejects.
+        self.assertFalse(list(Draft202012Validator(transport_schema(original)).iter_errors(denied)))
+
+    def test_no_exclusions_means_no_extra_prompt(self):
+        state = {"context": {"receipts": [], "read": {"propositions": []},
+                             "gate": {"propositions": []}, "write": {"propositions": []}},
+                 "schema": self.schema}
+        self.assertEqual(len(prompt_for(state)), 3)
+        self.assertEqual(prohibited_instrument_invocations(self.schema), [])
 
     def test_single_acquisition_defer_requires_actual_fields(self):
         schema = {"$defs": {"actions": {"acquisition.defer": {
