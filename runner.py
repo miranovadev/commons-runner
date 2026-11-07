@@ -134,6 +134,41 @@ def prohibited_instrument_match(schema: dict, contribution: dict) -> dict | None
     return None
 
 
+def instrument_kind_guide(schema: dict) -> list[dict]:
+    """Describe only Instrument kinds actually offered by Commons."""
+    actions = (schema.get("$defs") or {}).get("actions") or {}
+    action = actions.get("instrument.execute")
+    if not isinstance(action, dict):
+        return []
+    definition = (action.get("properties") or {}).get("instrument") or {}
+    if "$ref" in definition:
+        if definition["$ref"] != "#/$defs/instrument":
+            raise RunnerError("Unexpected Instrument schema reference")
+        definition = (schema.get("$defs") or {}).get("instrument") or {}
+    alternatives = definition.get("anyOf") or [definition]
+    descriptions = {
+        "citation": "Cite an existing Commons Proposition or Attestation ULID. Never invent an ID or use a Receipt/execution ID.",
+        "hyperlink": "Observe a public web URL. Choose a different URL if the exact invocation is excluded.",
+        "web_search": "Search external resources by query when a known URL is absent or already tried.",
+        "proposition_search": "Search existing Commons Propositions. Useful when no eligible Citation subject is known.",
+        "load_file": "Preserve a public HTTP(S) file as an Artifact, not a normal web page citation.",
+    }
+    kinds = []
+    for alternative in alternatives:
+        if not isinstance(alternative, dict):
+            continue
+        properties = alternative.get("properties") or {}
+        kind = (properties.get("kind") or {}).get("const")
+        if not isinstance(kind, str):
+            continue
+        kinds.append({
+            "kind": kind,
+            "purpose": descriptions.get(kind, alternative.get("description", "")),
+            "required_fields": alternative.get("required", []),
+        })
+    return kinds
+
+
 def prompt_for(state: dict) -> list[dict]:
     """Use the exact shared cognitive context, not the obsolete operational plan."""
     context = state["context"]
@@ -144,6 +179,7 @@ def prompt_for(state: dict) -> list[dict]:
               "required_fields": item.get("required", [])}
              for name, item in actions.items()]
     prohibited = prohibited_instrument_invocations(state["schema"])
+    instrument_kinds = instrument_kind_guide(state["schema"])
     return [
         {"role": "system", "content": (
             "You are the Participant identified in the supplied context. "
@@ -160,6 +196,11 @@ def prompt_for(state: dict) -> list[dict]:
         {"role": "user", "content": json.dumps(context, ensure_ascii=False, separators=(",", ":"))},
         {"role": "user", "content": "Available actions (descriptions, not an output template): " +
          json.dumps(guide, ensure_ascii=False, separators=(",", ":"))},
+        *([{"role": "user", "content": (
+            "Available Instrument strategies (choose based on what evidence is needed; "
+            "only kinds offered by Commons are listed): " +
+            json.dumps(instrument_kinds, ensure_ascii=False, separators=(",", ":"))
+        )}] if instrument_kinds else []),
         *([{"role": "user", "content": (
             "PROHIBITED instrument.execute combinations (already relevant; do not repeat "
             "the same target and invocation). You may choose another permissible "
@@ -408,6 +449,8 @@ def run_action(commons: httpx.Client, cfg: dict, url: str, state: dict, *, submi
     output_schema = transport_schema(schema)
     console.print(f"Model: {cfg['model']} · context: {cfg['context']} tokens · prompt: "
                   f"{len(messages[1]['content']):,} characters")
+    rejected: set[str] = set()
+    rejected_exclusions = 0
     for attempt in range(cfg["schema_retries"] + 1):
         started = time.perf_counter()
         contribution, metrics = infer(cfg, messages, output_schema)
@@ -415,24 +458,34 @@ def run_action(commons: httpx.Client, cfg: dict, url: str, state: dict, *, submi
         errors = validation_messages(schema, contribution)
         if not errors:
             break
+        key = json.dumps(contribution, sort_keys=True, separators=(",", ":"))
+        repeated = key in rejected
+        rejected.add(key)
+        if prohibited_instrument_match(schema, contribution):
+            rejected_exclusions += 1
         console.print("[red]Commons schema rejected the proposed action:[/red]")
         for error in errors:
-            console.print(f"  [red]•[/red] {error}", markup=False)
+            console.print(f"  • {error}", style="red", markup=False)
+        console.print(f"[yellow]Inference diagnostics: {attempt + 1} rejected, "
+                      f"{len(rejected)} distinct, {rejected_exclusions} excluded Instrument attempt(s).[/yellow]")
         if attempt >= cfg["schema_retries"]:
             raise RunnerError("Generated contribution failed Commons JSON Schema after "
                               f"{attempt + 1} attempt(s). No contribution submitted.")
-        console.print(f"[yellow]Retrying inference with validation feedback "
+        console.print(f"[yellow]Retrying with a fresh inference context "
                       f"({attempt + 1}/{cfg['schema_retries']}); no POST has occurred.[/yellow]")
-        messages.extend([
-            {"role": "assistant", "content": json.dumps(contribution, ensure_ascii=False)},
-            {"role": "user", "content": (
-                "Your last contribution was rejected by the Commons JSON Schema. "
-                "Do not repeat it. Correct these exact errors:\n- " + "\n- ".join(errors)
-                + "\nReturn ONLY a corrected complete JSON contribution object. "
-                "Do not invent IDs, fields or actions. If receipt_options are optional, "
-                "omit them unless their selected IDs are explicitly allowed by the schema."
-            )},
-        ])
+        # Never replay rejected assistant JSON as an assistant message; it
+        # encourages small models to repeat the exact prohibited invocation.
+        messages = prompt_for(state)
+        feedback = ("The previous contribution was rejected by Commons. " +
+                    " ".join(errors) +
+                    " Select a NEW admissible action or Instrument invocation. "
+                    "Do not invent Citation subjects. If you do not know an existing "
+                    "Proposition or Attestation ULID, consider an available search "
+                    "Instrument instead of guessing one. "
+                    "Return only a complete JSON contribution object.")
+        if repeated:
+            feedback += " You have already repeated a rejected contribution; choose a different strategy."
+        messages.append({"role": "user", "content": feedback})
     console.print("[green]✓[/green] Contribution validated against current Commons schema")
     eval_seconds = metrics.get("eval_duration", 0) / 1e9
     console.print(f"Tokens: {metrics.get('prompt_eval_count', '?')} input / "
