@@ -1,12 +1,13 @@
 """No Ollama or Commons server required: contract-shape regressions."""
 import unittest
+from unittest.mock import patch
 
 from jsonschema import Draft202012Validator
 
 from runner import (RunnerError, prompt_for, transport_schema, validation_messages,
                     prohibited_instrument_invocations, prohibited_instrument_match,
                     instrument_kind_guide, strategy_schema,
-                    contribution_schema_for_strategy, rejection_feedback)
+                    contribution_schema_for_strategy, rejection_feedback, infer_staged)
 
 
 class TransportSchemaTests(unittest.TestCase):
@@ -239,6 +240,31 @@ class TransportSchemaTests(unittest.TestCase):
         with self.assertRaises(Exception):
             contribution_schema_for_strategy(
                 self.schema, {"action": "made.up"})
+
+    def test_two_stage_inference_uses_distinct_selection_and_detail_schemas(self):
+        state = {"schema": self.schema, "context": {
+            "participant": {"callsign": "Qwen"}, "receipts": [],
+            "read": {"propositions": []}, "gate": {"propositions": []},
+            "write": {"question": "What differs?", "propositions": []},
+        }}
+        proposal = {"action": "instrument.execute", "proposition_id": "A",
+                    "instrument": {"kind": "web_search", "query": "Roman concrete"}}
+        with patch("runner.infer", side_effect=[
+            ({"action": "instrument.execute", "instrument_kind": "web_search"}, {}),
+            (proposal, {"eval_count": 12}),
+        ]) as infer_mock:
+            output, metrics = infer_staged({"model": "stub"}, state, [])
+        self.assertEqual(output, proposal)
+        self.assertEqual(metrics["eval_count"], 12)
+        self.assertEqual(infer_mock.call_count, 2)
+        first, second = [call.args[2] for call in infer_mock.call_args_list]
+        self.assertFalse(list(Draft202012Validator(first).iter_errors({
+            "action": "instrument.execute", "instrument_kind": "web_search"})))
+        self.assertFalse(list(Draft202012Validator(second).iter_errors(proposal)))
+        self.assertTrue(list(Draft202012Validator(second).iter_errors({
+            "action": "instrument.execute", "proposition_id": "A",
+            "instrument": {"kind": "citation", "reference": "a"},
+        })))
 
     def test_single_action_rest_has_no_instrument_kind(self):
         schema = {"$defs": {"actions": {"participant.rest": {
