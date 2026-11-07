@@ -5,7 +5,8 @@ from jsonschema import Draft202012Validator
 
 from runner import (RunnerError, prompt_for, transport_schema, validation_messages,
                     prohibited_instrument_invocations, prohibited_instrument_match,
-                    instrument_kind_guide)
+                    instrument_kind_guide, strategy_schema,
+                    contribution_schema_for_strategy, rejection_feedback)
 
 
 class TransportSchemaTests(unittest.TestCase):
@@ -199,6 +200,77 @@ class TransportSchemaTests(unittest.TestCase):
         })))
         # Full Commons validation, not generation, rejects unbounded exclusions.
         self.assertEqual(len(instrument_kind_guide(schema)), 2)
+
+    def test_two_stage_strategy_selects_instrument_kind_without_parameters(self):
+        selector = strategy_schema(self.schema)
+        self.assertFalse(list(Draft202012Validator(selector).iter_errors(
+            {"action": "instrument.execute", "instrument_kind": "web_search"})))
+        self.assertTrue(list(Draft202012Validator(selector).iter_errors(
+            {"action": "instrument.execute"})))
+        self.assertTrue(list(Draft202012Validator(selector).iter_errors(
+            {"action": "instrument.execute", "instrument_kind": "invented"})))
+        self.assertFalse(list(Draft202012Validator(selector).iter_errors(
+            {"action": "attestation.create"})))
+        stage2 = contribution_schema_for_strategy(
+            self.schema, {"action": "instrument.execute", "instrument_kind": "web_search"})
+        check = Draft202012Validator(stage2)
+        self.assertFalse(list(check.iter_errors({
+            "action": "instrument.execute", "proposition_id": "A",
+            "instrument": {"kind": "web_search", "query": "Roman concrete longevity"},
+        })))
+        self.assertTrue(list(check.iter_errors({
+            "action": "instrument.execute", "proposition_id": "A",
+            "instrument": {"kind": "citation", "reference": "a"},
+        })))
+        self.assertTrue(list(check.iter_errors({"action": "instrument.execute"})))
+
+    def test_two_stage_action_selection_preserves_attestation_target_bindings(self):
+        chosen = contribution_schema_for_strategy(
+            self.schema, {"action": "attestation.create"})
+        check = Draft202012Validator(chosen)
+        self.assertFalse(list(check.iter_errors({
+            "action": "attestation.create", "proposition_id": "A",
+            "direction": "support",
+        })))
+        self.assertTrue(list(check.iter_errors({
+            "action": "attestation.create", "proposition_id": "A",
+            "direction": "refute",
+        })))
+        with self.assertRaises(Exception):
+            contribution_schema_for_strategy(
+                self.schema, {"action": "made.up"})
+
+    def test_single_action_rest_has_no_instrument_kind(self):
+        schema = {"$defs": {"actions": {"participant.rest": {
+            "type": "object", "required": ["action"],
+            "properties": {"action": {"const": "participant.rest"}},
+        }}}}
+        choice = {"action": "participant.rest"}
+        self.assertFalse(list(Draft202012Validator(strategy_schema(schema)).iter_errors(choice)))
+        self.assertFalse(list(Draft202012Validator(
+            contribution_schema_for_strategy(schema, choice)).iter_errors(choice)))
+
+    def test_rejection_feedback_preserves_all_reasons_and_no_cross_cycle_injection(self):
+        rejected = [
+            ({"action": "instrument.execute", "instrument": {
+                "kind": "citation", "reference": "origin"}},
+             ["Already cited this exact origin"]),
+            ({"action": "instrument.execute", "instrument": {
+                "kind": "hyperlink", "reference": "https://example.org"}},
+             ["Already retrieved this URL"]),
+        ]
+        feedback = rejection_feedback(rejected)
+        self.assertIn("Already cited this exact origin", feedback)
+        self.assertIn("Already retrieved this URL", feedback)
+        self.assertIn('"reference":"origin"', feedback)
+        self.assertIn('"reference":"https://example.org"', feedback)
+        state = {"schema": {"$defs": {"actions": {"participant.rest": {
+            "required": ["action"], "properties": {"action": {"const": "participant.rest"}}}}}},
+                 "context": {"participant": {"callsign": "Qwen"}, "receipts": [],
+                             "read": {"propositions": []},
+                             "gate": {"propositions": []}, "write": {"propositions": []}}}
+        self.assertNotIn("Already cited this exact origin",
+                         "\\n".join(msg["content"] for msg in prompt_for(state)))
 
     def test_single_acquisition_defer_requires_actual_fields(self):
         schema = {"$defs": {"actions": {"acquisition.defer": {
