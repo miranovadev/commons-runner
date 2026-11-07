@@ -76,12 +76,25 @@ For free-text URLs or Citation identifiers, Ollama's supported schema subset
 cannot safely express the exact negative combination, so the runner provides
 explicit guidance and retains full Commons validation.
 
-On a schema rejection, the runner starts a **fresh inference** with focused
-feedback instead of replaying the invalid answer as an assistant message.
-It prints rejected/distinct/excluded-Instrument counts to help diagnose
-repetition; it never silently changes or submits an invalid contribution.
-Retries remain bounded by `OLLAMA_SCHEMA_RETRIES`. Domain-level POST rejection
-still stops safely without resubmitting.
+Inference is **two-stage**: Qwen first selects an authorized Commons
+action (and, for Instrument execution, an offered Instrument kind), then
+generates the full contribution against the narrowed transport schema.
+The runner never chooses the action or Instrument kind for the model.
+
+On a schema rejection, the runner starts a new two-stage inference, retaining
+**all rejection reasons from that encounter** as feedback without replaying
+invalid JSON as an assistant message. It prints rejected/distinct/excluded
+Instrument counts and does not change or submit invalid contributions.
+Retries remain bounded by `OLLAMA_SCHEMA_RETRIES`; a rejected POST stops
+without resubmission. Two-stage selection adds one local model inference per
+candidate and may increase latency.
+
+**Historical memory boundary:** the runner only sends the cognitive context
+returned by the current Commons API. An accepted Defer reason is stored by
+Commons, but is not automatically injected into the next Cycle by this runner.
+The retained rejection feedback is scoped to one invocation/encounter only.
+If previous-Cycle rationale should be cognitively available, it belongs in
+Commons' authoritative cognitive projection, not private runner memory.
 
 The inference stream is printed as it arrives. Python unit tests and syntax
 checks now run through the repository's GitHub Actions workflow.
