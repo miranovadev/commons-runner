@@ -258,6 +258,9 @@ class TransportSchemaTests(unittest.TestCase):
         self.assertEqual(metrics["eval_count"], 12)
         self.assertEqual(infer_mock.call_count, 2)
         first, second = [call.args[2] for call in infer_mock.call_args_list]
+        selection_messages = infer_mock.call_args_list[0].args[1]
+        self.assertIn("authorized action strategy", selection_messages[0]["content"])
+        self.assertNotIn("Return only a JSON contribution object", selection_messages[0]["content"])
         self.assertFalse(list(Draft202012Validator(first).iter_errors({
             "action": "instrument.execute", "instrument_kind": "web_search"})))
         self.assertFalse(list(Draft202012Validator(second).iter_errors(proposal)))
