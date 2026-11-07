@@ -102,7 +102,7 @@ class TransportSchemaTests(unittest.TestCase):
         denied = {"action": "instrument.execute", "proposition_id": "A",
                   "instrument": {"kind": "citation", "reference": "A"}}
         allowed = {"action": "instrument.execute", "proposition_id": "A",
-                   "instrument": {"kind": "citation", "reference": "B"}}
+                   "instrument": {"kind": "citation", "reference": "a different"}}
         original = {"$defs": schema["$defs"], "oneOf": [
             {"$ref": "#/$defs/actions/instrument.execute"},
         ]}
