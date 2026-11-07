@@ -470,10 +470,20 @@ def infer_staged(cfg: dict, state: dict, feedback: list[tuple[dict, list[str]]])
     base = prompt_for(state)
     if feedback:
         base.append({"role": "user", "content": rejection_feedback(feedback)})
-    selection_prompt = base + [{"role": "user", "content":
-        "Stage 1 of 2: choose ONLY the action strategy. If instrument.execute, "
-        "choose the Instrument kind as well. Do not provide parameters yet; "
-        "use the supplied selection JSON Schema."}]
+    # Stage 1 is intentionally NOT a Commons contribution. Override the
+    # contribution-only system instruction rather than contradicting it.
+    selection_system = base[0]["content"].replace(
+        "Select one available action. Return only a JSON contribution object.",
+        "Select one authorized action strategy in the selection JSON shape only.",
+    )
+    selection_prompt = [
+        {"role": "system", "content": selection_system},
+        *base[1:],
+        {"role": "user", "content":
+         "Stage 1 of 2: choose ONLY the action strategy. If instrument.execute, "
+         "choose the Instrument kind as well. Do not provide parameters yet; "
+         "use the supplied selection JSON Schema."},
+    ]
     console.print("[cyan]Stage 1 · action / Instrument strategy[/cyan]")
     strategy, _ = infer(cfg, selection_prompt, strategy_schema(state["schema"]))
     if list(Draft202012Validator(strategy_schema(state["schema"])).iter_errors(strategy)):
