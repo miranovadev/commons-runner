@@ -4,7 +4,8 @@ import unittest
 from jsonschema import Draft202012Validator
 
 from runner import (RunnerError, prompt_for, transport_schema, validation_messages,
-                    prohibited_instrument_invocations, prohibited_instrument_match)
+                    prohibited_instrument_invocations, prohibited_instrument_match,
+                    instrument_kind_guide)
 
 
 class TransportSchemaTests(unittest.TestCase):
@@ -141,6 +142,63 @@ class TransportSchemaTests(unittest.TestCase):
                  "schema": self.schema}
         self.assertEqual(len(prompt_for(state)), 3)
         self.assertEqual(prohibited_instrument_invocations(self.schema), [])
+
+    def test_instrument_strategy_guide_lists_only_authorized_kinds(self):
+        kinds = instrument_kind_guide(self.schema)
+        self.assertEqual({item["kind"] for item in kinds}, {"citation", "web_search"})
+        self.assertIn("Never invent", kinds[0]["purpose"])
+        self.assertEqual(instrument_kind_guide({"$defs": {"actions": {}}}), [])
+        state = {"context": {"participant": {"callsign": "Qwen"},
+                             "read": {"propositions": []},
+                             "gate": {"propositions": []},
+                             "write": {"propositions": []}, "receipts": []},
+                 "schema": self.schema}
+        self.assertIn("Available Instrument strategies", prompt_for(state)[-1]["content"])
+        self.assertNotIn('"kind":"load_file"', prompt_for(state)[-1]["content"])
+
+    def test_finite_exclusion_only_restricts_exact_reference_and_target(self):
+        schema = {"$defs": {"instrument": {"anyOf": [
+            {"type": "object", "additionalProperties": False,
+             "properties": {"kind": {"const": "citation"},
+                            "reference": {"type": "string", "enum": ["A", "B"]}},
+             "required": ["kind", "reference"]},
+            {"type": "object", "additionalProperties": False,
+             "properties": {"kind": {"const": "web_search"}, "query": {"type": "string"}},
+             "required": ["kind", "query"]},
+        ]}, "actions": {"instrument.execute": {
+            "type": "object", "required": ["action", "proposition_id", "instrument"],
+            "properties": {"action": {"const": "instrument.execute"},
+                           "proposition_id": {"type": "string", "enum": ["TARGET"]},
+                           "instrument": {"$ref": "#/$defs/instrument"}},
+        }}}, "x-commons": {"instrument_exclusions": {
+            "TARGET": [{"invocation": {"kind": "citation", "reference": "A"}}],
+        }}}
+        result = transport_schema(schema)
+        check = Draft202012Validator(result)
+        action = lambda reference: {"action": "instrument.execute", "proposition_id": "TARGET",
+                                    "instrument": {"kind": "citation", "reference": reference}}
+        self.assertTrue(list(check.iter_errors(action("A"))))
+        self.assertFalse(list(check.iter_errors(action("B"))))
+        self.assertFalse(list(check.iter_errors({
+            "action": "instrument.execute", "proposition_id": "TARGET",
+            "instrument": {"kind": "web_search", "query": "Roman concrete"},
+        })))
+
+    def test_unbounded_citation_exclusion_does_not_remove_kind(self):
+        schema = {
+            "$defs": self.schema["$defs"],
+            "x-commons": {"instrument_exclusions": {
+                "A": [{"invocation": {"kind": "citation", "reference": "A"}}],
+            }},
+        }
+        result = transport_schema(schema)
+        check = Draft202012Validator(result)
+        self.assertFalse(list(check.iter_errors({
+            "action": "instrument.execute", "proposition_id": "A",
+            "instrument": {"kind": "citation", "reference": "A"},
+        })))
+        # Full Commons validation, not generation, rejects unbounded exclusions.
+        self.assertEqual(len(instrument_kind_guide(schema)), 2)
 
     def test_single_acquisition_defer_requires_actual_fields(self):
         schema = {"$defs": {"actions": {"acquisition.defer": {
