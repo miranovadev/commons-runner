@@ -390,6 +390,106 @@ def transport_schema(commons_schema: dict) -> dict:
     return variants[0] if len(variants) == 1 else {"anyOf": variants}
 
 
+def strategy_schema(schema: dict) -> dict:
+    """First inference chooses an action, plus Instrument kind when relevant.
+
+    Choices come solely from the authoritative Commons action inventory.
+    """
+    actions = (schema.get("$defs") or {}).get("actions") or {}
+    if not actions:
+        raise RunnerError("No authorized actions to select")
+    kinds = [item["kind"] for item in instrument_kind_guide(schema)]
+    branches = []
+    for name in actions:
+        if name == "instrument.execute" and kinds:
+            for kind in kinds:
+                branches.append({
+                    "type": "object", "additionalProperties": False,
+                    "properties": {"action": {"const": name},
+                                   "instrument_kind": {"const": kind}},
+                    "required": ["action", "instrument_kind"],
+                })
+        else:
+            branches.append({
+                "type": "object", "additionalProperties": False,
+                "properties": {"action": {"const": name}},
+                "required": ["action"],
+            })
+    return branches[0] if len(branches) == 1 else {"anyOf": branches}
+
+
+def contribution_schema_for_strategy(schema: dict, strategy: dict) -> dict:
+    """Narrow generation to the model-selected action and Instrument kind.
+
+    This does not authorize anything new. The unmodified Commons schema still
+    validates the completed contribution before the POST.
+    """
+    Draft202012Validator(strategy_schema(schema)).validate(strategy)
+    action = strategy["action"]
+    all_schema = transport_schema(schema)
+    alternatives = all_schema.get("anyOf", [all_schema])
+    candidates = [item for item in alternatives
+                  if (item.get("properties", {}).get("action") or {}).get("const") == action]
+    if not candidates:
+        raise RunnerError(f"Selected action has no transport schema: {action}")
+    kind = strategy.get("instrument_kind")
+    if kind is not None:
+        narrowed = []
+        for candidate in candidates:
+            rule = candidate.get("properties", {}).get("instrument") or {}
+            branches = rule.get("anyOf", [rule])
+            allowed = [item for item in branches
+                       if (item.get("properties", {}).get("kind") or {}).get("const") == kind]
+            if not allowed:
+                continue
+            filtered = allowed[0] if len(allowed) == 1 else {"anyOf": allowed}
+            narrowed.append({**candidate, "properties": {
+                **candidate["properties"], "instrument": filtered,
+            }})
+        candidates = narrowed
+    if not candidates:
+        raise RunnerError(f"No transport schema for chosen Instrument kind: {kind}")
+    return candidates[0] if len(candidates) == 1 else {"anyOf": candidates}
+
+
+def rejection_feedback(rejections: list[tuple[dict, list[str]]]) -> str:
+    """Summarise all failures from this encounter, not just the last retry."""
+    lines = ["Prior proposed contributions were rejected. Do not repeat these exact "
+             "target/invocation combinations or invent Citation subject IDs."]
+    for index, (contribution, errors) in enumerate(rejections, 1):
+        lines.append(f"{index}. Rejected: " +
+                     json.dumps(contribution, ensure_ascii=False, separators=(",", ":")) +
+                     " | Why: " + "; ".join(errors))
+    lines.append("Choose a different admissible strategy when possible. "
+                 "An available search Instrument can investigate new evidence.")
+    return "\n".join(lines)
+
+
+def infer_staged(cfg: dict, state: dict, feedback: list[tuple[dict, list[str]]]) -> tuple[dict, dict]:
+    """Model selects a strategy, then fills its own selected action fields."""
+    base = prompt_for(state)
+    if feedback:
+        base.append({"role": "user", "content": rejection_feedback(feedback)})
+    selection_prompt = base + [{"role": "user", "content":
+        "Stage 1 of 2: choose ONLY the action strategy. If instrument.execute, "
+        "choose the Instrument kind as well. Do not provide parameters yet; "
+        "use the supplied selection JSON Schema."}]
+    console.print("[cyan]Stage 1 · action / Instrument strategy[/cyan]")
+    strategy, _ = infer(cfg, selection_prompt, strategy_schema(state["schema"]))
+    if list(Draft202012Validator(strategy_schema(state["schema"])).iter_errors(strategy)):
+        raise RunnerError("Model selected an invalid action strategy; no contribution submitted")
+    detail_schema = contribution_schema_for_strategy(state["schema"], strategy)
+    console.print(f"[cyan]Stage 2 · {strategy['action']}" +
+                  (f" / {strategy['instrument_kind']}" if "instrument_kind" in strategy else "") +
+                  "[/cyan]")
+    detail_prompt = base + [{"role": "user", "content":
+        "Stage 2 of 2: you selected " +
+        json.dumps(strategy, separators=(",", ":")) +
+        ". Produce the complete Commons contribution for THIS choice only. "
+        "Choose its actual parameters; do not copy schema definitions."}]
+    return infer(cfg, detail_prompt, detail_schema)
+
+
 def infer(cfg: dict, messages: list[dict], output_schema: dict) -> tuple[dict, dict]:
     payload = {
         "model": cfg["model"],
@@ -525,10 +625,11 @@ def run_action(commons: httpx.Client, cfg: dict, url: str, state: dict, *, submi
     console.print(f"Model: {cfg['model']} · context: {cfg['context']} tokens · prompt: "
                   f"{len(messages[1]['content']):,} characters")
     rejected: set[str] = set()
-    rejected_exclusions = 0
+    failures: list[tuple[dict, list[str]]] = []
+    excluded_count = 0
     for attempt in range(cfg["schema_retries"] + 1):
         started = time.perf_counter()
-        contribution, metrics = infer(cfg, messages, output_schema)
+        contribution, metrics = infer_staged(cfg, state, failures)
         elapsed = time.perf_counter() - started
         errors = validation_messages(schema, contribution)
         if not errors:
@@ -536,31 +637,22 @@ def run_action(commons: httpx.Client, cfg: dict, url: str, state: dict, *, submi
         key = json.dumps(contribution, sort_keys=True, separators=(",", ":"))
         repeated = key in rejected
         rejected.add(key)
+        failures.append((contribution, errors))
         if prohibited_instrument_match(schema, contribution):
-            rejected_exclusions += 1
+            excluded_count += 1
         console.print("[red]Commons schema rejected the proposed action:[/red]")
         for error in errors:
             console.print(f"  • {error}", style="red", markup=False)
-        console.print(f"[yellow]Inference diagnostics: {attempt + 1} rejected, "
-                      f"{len(rejected)} distinct, {rejected_exclusions} excluded Instrument attempt(s).[/yellow]")
+        console.print(f"[yellow]Inference diagnostics: {len(failures)} rejected, "
+                      f"{len(rejected)} distinct, {excluded_count} excluded Instrument attempt(s).[/yellow]")
         if attempt >= cfg["schema_retries"]:
             raise RunnerError("Generated contribution failed Commons JSON Schema after "
                               f"{attempt + 1} attempt(s). No contribution submitted.")
-        console.print(f"[yellow]Retrying with a fresh inference context "
-                      f"({attempt + 1}/{cfg['schema_retries']}); no POST has occurred.[/yellow]")
-        # Never replay rejected assistant JSON as an assistant message; it
-        # encourages small models to repeat the exact prohibited invocation.
-        messages = prompt_for(state)
-        feedback = ("The previous contribution was rejected by Commons. " +
-                    " ".join(errors) +
-                    " Select a NEW admissible action or Instrument invocation. "
-                    "Do not invent Citation subjects. If you do not know an existing "
-                    "Proposition or Attestation ULID, consider an available search "
-                    "Instrument instead of guessing one. "
-                    "Return only a complete JSON contribution object.")
+        console.print(f"[yellow]Retrying strategy selection with all prior rejection "
+                      f"reasons ({attempt + 1}/{cfg['schema_retries']}); no POST has occurred.[/yellow]")
         if repeated:
-            feedback += " You have already repeated a rejected contribution; choose a different strategy."
-        messages.append({"role": "user", "content": feedback})
+            console.print("[yellow]Repeated rejected contribution; asking the model "
+                          "to reconsider the strategy.[/yellow]")
     console.print("[green]✓[/green] Contribution validated against current Commons schema")
     eval_seconds = metrics.get("eval_duration", 0) / 1e9
     console.print(f"Tokens: {metrics.get('prompt_eval_count', '?')} input / "
