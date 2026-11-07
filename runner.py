@@ -98,6 +98,42 @@ def endpoint(cfg: dict):
             f"/participants/{quote(cfg['participant'], safe='')}/participate")
 
 
+def prohibited_instrument_invocations(schema: dict) -> list[dict]:
+    """Exact target/invocation pairs forbidden by the authoritative Commons schema.
+
+    This is advisory model-facing guidance, never a replacement for validation.
+    """
+    metadata = (schema.get("x-commons") or {}).get("instrument_exclusions") or {}
+    if not isinstance(metadata, dict):
+        raise RunnerError("Invalid Commons instrument exclusion catalogue")
+    prohibited = []
+    for proposition_id, exclusions in metadata.items():
+        if not isinstance(exclusions, list):
+            raise RunnerError("Invalid Commons instrument exclusions")
+        for entry in exclusions:
+            invocation = entry.get("invocation") if isinstance(entry, dict) else None
+            if not isinstance(invocation, dict) or not isinstance(invocation.get("kind"), str):
+                raise RunnerError("Invalid Commons excluded Instrument invocation")
+            prohibited.append({"proposition_id": proposition_id, "instrument": invocation})
+    return prohibited
+
+
+def prohibited_instrument_match(schema: dict, contribution: dict) -> dict | None:
+    """Return the exact forbidden combination, if this contribution matches one."""
+    if contribution.get("action") != "instrument.execute":
+        return None
+    instrument = contribution.get("instrument")
+    if not isinstance(instrument, dict):
+        return None
+    for entry in prohibited_instrument_invocations(schema):
+        if contribution.get("proposition_id") != entry["proposition_id"]:
+            continue
+        invocation = entry["instrument"]
+        if all(instrument.get(key) == value for key, value in invocation.items()):
+            return entry
+    return None
+
+
 def prompt_for(state: dict) -> list[dict]:
     """Use the exact shared cognitive context, not the obsolete operational plan."""
     context = state["context"]
@@ -107,6 +143,7 @@ def prompt_for(state: dict) -> list[dict]:
     guide = [{"action": name, "purpose": item.get("description", ""),
               "required_fields": item.get("required", [])}
              for name, item in actions.items()]
+    prohibited = prohibited_instrument_invocations(state["schema"])
     return [
         {"role": "system", "content": (
             "You are the Participant identified in the supplied context. "
@@ -123,6 +160,13 @@ def prompt_for(state: dict) -> list[dict]:
         {"role": "user", "content": json.dumps(context, ensure_ascii=False, separators=(",", ":"))},
         {"role": "user", "content": "Available actions (descriptions, not an output template): " +
          json.dumps(guide, ensure_ascii=False, separators=(",", ":"))},
+        *([{"role": "user", "content": (
+            "PROHIBITED instrument.execute combinations (already relevant; do not repeat "
+            "the same target and invocation). You may choose another permissible "
+            "Instrument or another available action. This list is guidance, not an "
+            "output template: " +
+            json.dumps(prohibited, ensure_ascii=False, separators=(",", ":"))
+        )}] if prohibited else []),
     ]
 
 
@@ -283,6 +327,15 @@ def validation_messages(schema: dict, contribution: dict) -> list[str]:
     errors = list(validator.iter_errors(contribution))
     if not errors:
         return []
+
+    forbidden = prohibited_instrument_match(schema, contribution)
+    if forbidden is not None:
+        return [
+            "This instrument.execute target/invocation combination has already been "
+            "performed or is excluded by Commons: " +
+            json.dumps(forbidden, ensure_ascii=False, separators=(",", ":")) +
+            ". Choose a different lawful Instrument invocation; do not retry this exact combination."
+        ]
 
     action = contribution.get("action")
     actions = (schema.get("$defs") or {}).get("actions") or {}
