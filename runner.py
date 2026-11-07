@@ -211,6 +211,78 @@ def prompt_for(state: dict) -> list[dict]:
     ]
 
 
+def constrain_finite_instrument_exclusions(variants: list[dict], schema: dict) -> list[dict]:
+    """Represent exclusions positively only when they remove an exact enum value.
+
+    Unbounded strings cannot safely encode a single forbidden URL/ULID in the
+    subset of JSON Schema accepted by Ollama. Do not delete a whole Instrument
+    kind or restrict other target Propositions just to silence model retries.
+    """
+    forbidden = prohibited_instrument_invocations(schema)
+    if not forbidden:
+        return variants
+    preserved = []
+    for variant in variants:
+        properties = variant.get("properties") or {}
+        if (properties.get("action") or {}).get("const") != "instrument.execute":
+            preserved.append(variant)
+            continue
+        target_rule = properties.get("proposition_id") or {}
+        targets = target_rule.get("enum", [target_rule.get("const")])
+        if len(targets) != 1 or targets[0] is None:
+            preserved.append(variant)
+            continue
+        instrument = properties.get("instrument") or {}
+        choices = instrument.get("anyOf")
+        if not isinstance(choices, list):
+            preserved.append(variant)
+            continue
+        retained = []
+        for original_choice in choices:
+            choice = {
+                **original_choice,
+                "properties": {
+                    k: dict(v) if isinstance(v, dict) else v
+                    for k, v in (original_choice.get("properties") or {}).items()
+                },
+            }
+            fields = choice["properties"]
+            kind = (fields.get("kind") or {}).get("const")
+            for excluded in forbidden:
+                if excluded["proposition_id"] != targets[0]:
+                    continue
+                invocation = excluded["instrument"]
+                if kind is None or invocation.get("kind") != kind:
+                    continue
+                # Safe only for a single varying field and otherwise const-bound
+                # fields. A finite enum permits exact subtraction.
+                varying = [key for key in invocation
+                           if key != "kind" and isinstance(fields.get(key), dict)
+                           and isinstance(fields[key].get("enum"), list)]
+                if len(varying) != 1:
+                    continue
+                field = varying[0]
+                if any(key not in ("kind", field) and
+                       (fields.get(key) or {}).get("const") != value
+                       for key, value in invocation.items()):
+                    continue
+                values = fields[field]["enum"]
+                if invocation[field] not in values:
+                    continue
+                fields[field]["enum"] = [value for value in values
+                                          if value != invocation[field]]
+            if all(not isinstance(field, dict) or field.get("enum") != []
+                   for field in fields.values()):
+                retained.append(choice)
+        if not retained:
+            # No safe Instrument branch remains for this specific target.
+            continue
+        new_instrument = {**instrument, "anyOf": retained}
+        preserved.append({**variant, "properties": {**properties,
+                                                    "instrument": new_instrument}})
+    return preserved
+
+
 def transport_schema(commons_schema: dict) -> dict:
     """Adapt Commons action branches to an Ollama JSON grammar.
 
@@ -311,6 +383,9 @@ def transport_schema(commons_schema: dict) -> dict:
 
     if not variants:
         raise RunnerError("No usable Ollama action branches")
+    variants = constrain_finite_instrument_exclusions(variants, commons_schema)
+    if not variants:
+        raise RunnerError("Commons has no expressible action after finite exclusions")
     # Each branch is a contribution object: no participant/phase wrapper.
     return variants[0] if len(variants) == 1 else {"anyOf": variants}
 
