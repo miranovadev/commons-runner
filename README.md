@@ -67,9 +67,24 @@ rather than dumping the nested JSON Schema `not` clause. Other Instrument
 invocations remain possible; the runner never substitutes one on the model's
 behalf. This is an experiment in prompt guidance, not a new authority rule.
 
-The inference stream is printed as it arrives. Schema mismatches can trigger
-bounded inference-only correction attempts (`OLLAMA_SCHEMA_RETRIES`);
-neither malformed output nor failed submissions are silently rewritten.
+The runner also describes the **currently offered Instrument kinds** and their
+purpose, so a small model can deliberately choose between Citation, Hyperlink,
+Web Search and Proposition Search when those kinds are actually available.
+Known exclusions are represented in the output grammar **only when an exact
+finite enum value can be removed without excluding another lawful invocation**.
+For free-text URLs or Citation identifiers, Ollama's supported schema subset
+cannot safely express the exact negative combination, so the runner provides
+explicit guidance and retains full Commons validation.
+
+On a schema rejection, the runner starts a **fresh inference** with focused
+feedback instead of replaying the invalid answer as an assistant message.
+It prints rejected/distinct/excluded-Instrument counts to help diagnose
+repetition; it never silently changes or submits an invalid contribution.
+Retries remain bounded by `OLLAMA_SCHEMA_RETRIES`. Domain-level POST rejection
+still stops safely without resubmitting.
+
+The inference stream is printed as it arrives. Python unit tests and syntax
+checks now run through the repository's GitHub Actions workflow.
 
 ## Boundaries
 
