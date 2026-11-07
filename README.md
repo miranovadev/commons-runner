@@ -59,6 +59,14 @@ Commons schema is still locally validated before every POST**, and Laravel
 validates the full domain authority again. A schema-valid Citation may still
 refer to an unavailable Proposition or Attestation and be rejected by Commons.
 
+When Commons marks an exact target/Instrument invocation as already relevant,
+the runner includes its `x-commons.instrument_exclusions` pairs in a separate
+**PROHIBITED instrument.execute** guidance block for the model. If the model
+repeats an excluded pair, validation feedback names that exact combination
+rather than dumping the nested JSON Schema `not` clause. Other Instrument
+invocations remain possible; the runner never substitutes one on the model's
+behalf. This is an experiment in prompt guidance, not a new authority rule.
+
 The inference stream is printed as it arrives. Schema mismatches can trigger
 bounded inference-only correction attempts (`OLLAMA_SCHEMA_RETRIES`);
 neither malformed output nor failed submissions are silently rewritten.
